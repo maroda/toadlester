@@ -5,10 +5,12 @@ import (
 	"math/rand/v2"
 	"os"
 	"strconv"
+	"sync"
 )
 
 // CycBuffer is a cyclical shift register
 type CycBuffer struct {
+	MU      sync.Mutex
 	MName   string   // Metric name
 	Values  []string // Slice of whatever we need for responses
 	MaxSize int      // How big this buffer can be
@@ -50,6 +52,9 @@ func NewShiftCycBuffer(maxSize, limit, tail int, mod float64, f string) *CycBuff
 // First increase the Index, wrapping when reaching the full size
 // then return the value at that spot
 func (cb *CycBuffer) Shift() string {
+	cb.MU.Lock()
+	defer cb.MU.Unlock()
+
 	cb.Index = (cb.Index + 1) % len(cb.Values)
 	return cb.Values[cb.Index]
 }
@@ -82,12 +87,25 @@ func NewRandCycBuffer(maxSize, limit, tail int, mod float64, f string) *CycBuffe
 // Each of these can be queried by the endpoint to get well-defined random numbers.
 // It grabs new ones every time to create better randomness.
 func (eph *EPHandle) RandBuffers() {
-	bufferExp := NewRandCycBuffer(4, 10000, 8, 10000, "exp")
-	eph.MTypes["exp"].RandomBuffer = bufferExp.Values
-	bufferFloat := NewRandCycBuffer(4, 10000, 8, 10000, "float")
-	eph.MTypes["float"].RandomBuffer = bufferFloat.Values
-	bufferInt := NewRandCycBuffer(4, 10000, 8, 10000, "int")
-	eph.MTypes["int"].RandomBuffer = bufferInt.Values
+	sizeR := FillEnvVarInt("RAND_SIZE", 4)
+	limitR := FillEnvVarInt("RAND_LIMIT", 10000)
+	tailR := FillEnvVarInt("RAND_TAIL", 8)
+	modRenv := FillEnvVar("RAND_MOD")
+	modR, err := strconv.ParseFloat(modRenv, 64)
+	if err != nil {
+		modR = 10000
+	}
+
+	for _, mt := range eph.MTypes {
+		mt.MU.Lock()
+		bufferExp := NewRandCycBuffer(sizeR, limitR, tailR, modR, mt.Name)
+
+		bufferExp.MU.Lock()
+		eph.MTypes[mt.Name].RandomBuffer = bufferExp.Values
+
+		bufferExp.MU.Unlock()
+		mt.MU.Unlock()
+	}
 }
 
 // ShiftBuffers is the engine for advancing data (mtypes)

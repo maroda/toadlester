@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -22,6 +23,7 @@ type EPHandle struct {
 }
 
 type MType struct {
+	MU           sync.Mutex
 	Name         string       // Metric name
 	RandomBuffer []string     // Randomized metrics, key: name
 	CyclicBuffer []*CycBuffer // Cyclical metric series, key: name
@@ -47,7 +49,6 @@ func NewEPHandle(mtypes, buffers []string) *EPHandle {
 	// Init each cyclical shift register for every existing mtype
 	for _, buff := range buffers { // algorithms belong to buffers
 		for _, mt := range mtypes { // numeric types belong to mtypes
-
 			// Values in series that result from functions that fire when called
 			size := FillEnvVarInt(strings.ToUpper(mt)+"_SIZE", 10)
 			limit := FillEnvVarInt(strings.ToUpper(mt)+"_LIMIT", 10)
@@ -117,14 +118,21 @@ func (eph *EPHandle) SeriesInternalDataHandler(w http.ResponseWriter, r *http.Re
 		}
 	}
 
+	useCBAlgo.MU.Lock()
+	algoVal := useCBAlgo.Values[useCBAlgo.Index]
+	useCBAlgo.MU.Unlock()
+
 	slog.Info("algorithm match",
-		slog.String("requested", algotype),
-		slog.String("algo", useCBAlgo.MName),
-		slog.Any("values", useCBAlgo.Values),
+		slog.String("method", r.Method),
+		slog.String("request", r.RequestURI),
+		slog.String("requested.type", algotype),
+		slog.String("algo.name", useCBAlgo.MName),
+		slog.String("algo.value", algoVal),
+		slog.Any("full.values", useCBAlgo.Values),
 	)
 
 	w.Header().Set("Content-Type", "application/plaintext")
-	output := fmt.Sprintf("Metric_%s: %s\n", algotype, useCBAlgo.Values[useCBAlgo.Index])
+	output := fmt.Sprintf("Metric_%s: %s\n", algotype, algoVal)
 	w.Write([]byte(output))
 }
 
@@ -142,9 +150,23 @@ func JSONdataHandler(w http.ResponseWriter, r *http.Request) {
 func (eph *EPHandle) RandDataAllHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/plaintext; charset=utf-8")
 
+	for _, mt := range eph.MTypes {
+		mt.MU.Lock()
+	}
 	randexp := eph.MTypes["exp"].RandomBuffer[0]
 	randfloat := eph.MTypes["float"].RandomBuffer[0]
 	randint := eph.MTypes["int"].RandomBuffer[0]
+	for _, mt := range eph.MTypes {
+		mt.MU.Unlock()
+	}
+
+	slog.Info("randomizer match",
+		slog.String("method", r.Method),
+		slog.String("request", r.RequestURI),
+		slog.String("random.exponent", randexp),
+		slog.String("random.float", randfloat),
+		slog.String("random.integer", randint),
+	)
 
 	output := fmt.Sprintf("ExpMetric: %s\nFloatMetric: %s\nIntMetric: %s\n", randexp, randfloat, randint)
 	w.Write([]byte(output))
