@@ -11,37 +11,70 @@ import (
 // CycBuffer is a cyclical shift register
 type CycBuffer struct {
 	MU      sync.Mutex
-	MName   string   // Metric name
+	NType   string   // Numeric Type
+	MAlgo   string   // Metric Algorithm Name
 	Values  []string // Slice of whatever we need for responses
 	MaxSize int      // How big this buffer can be
 	Index   int      // We are at this index in the step buffer
 }
 
 // NewShiftCycBuffer creates cascading values to be shifted by one for each access
-func NewShiftCycBuffer(maxSize, limit, tail int, mod float64, f string) *CycBuffer {
+func NewShiftCycBuffer(maxSize, limit, tail int, mod float64, f, a string) *CycBuffer {
 	values := make([]string, 0, maxSize)
+	saltF := mod * float64(rand.Int32N(int32(limit))) * rand.Float64()
+	saltI := int(mod) * int(saltF)
 
-	switch f {
-	case "floatup":
-		for i := 0; i < maxSize; i++ {
-			values = append(values, strconv.FormatFloat(float64(limit-(limit-(tail*i)))*mod, 'f', 8, 64))
-		}
-	case "floatdown":
-		for i := 0; i < maxSize; i++ {
-			values = append(values, strconv.FormatFloat(float64(limit-(tail*i))*mod, 'f', 8, 64))
-		}
+	switch a {
 	case "up":
-		for i := 0; i < maxSize; i++ {
-			values = append(values, strconv.Itoa(limit-(limit-(tail*i))))
+		switch f {
+		case "exp":
+			for i := 0; i < maxSize; i++ {
+				values = append(values, strconv.FormatFloat(saltF*float64(limit-(limit-(tail*i)))*mod, 'e', 8, 64))
+			}
+		case "float":
+			for i := 0; i < maxSize; i++ {
+				values = append(values, strconv.FormatFloat(saltF*float64(limit-(limit-(tail*i)))*mod, 'f', 8, 64))
+			}
+		case "int":
+			for i := 0; i < maxSize; i++ {
+				values = append(values, strconv.Itoa(saltI*(limit-(limit-(tail*i)))))
+			}
 		}
 	case "down":
-		for i := 0; i < maxSize; i++ {
-			values = append(values, strconv.Itoa(limit-(tail*i)))
+		switch f {
+		case "exp":
+			for i := 0; i < maxSize; i++ {
+				values = append(values, strconv.FormatFloat(saltF*float64(limit-(tail*i))*mod, 'e', 8, 64))
+			}
+		case "float":
+			for i := 0; i < maxSize; i++ {
+				values = append(values, strconv.FormatFloat(saltF*float64(limit-(tail*i))*mod, 'f', 8, 64))
+			}
+		case "int":
+			for i := 0; i < maxSize; i++ {
+				values = append(values, strconv.Itoa(saltI*(limit-(tail*i))))
+			}
+		}
+	case "random":
+		switch f {
+		case "exp":
+			for i := 0; i < maxSize; i++ {
+				values = append(values, strconv.FormatFloat(saltF, 'e', tail, 64))
+			}
+		case "float":
+			for i := 0; i < maxSize; i++ {
+				values = append(values, strconv.FormatFloat(saltF, 'f', tail, 64))
+			}
+		case "int":
+			for i := 0; i < maxSize; i++ {
+				values = append(values, strconv.Itoa(int(saltF)))
+			}
 		}
 	}
 
 	return &CycBuffer{
-		MName:   f,
+		NType:   f,
+		MAlgo:   a,
 		Values:  values,
 		MaxSize: maxSize,
 		Index:   0,
@@ -59,30 +92,6 @@ func (cb *CycBuffer) Shift() string {
 	return cb.Values[cb.Index]
 }
 
-// NewRandCycBuffer creates slices of strings of configurable random numbers
-func NewRandCycBuffer(maxSize, limit, tail int, mod float64, f string) *CycBuffer {
-	values := make([]string, maxSize)
-	for i := 0; i < maxSize; i++ {
-		multiplier := mod * float64(rand.Int32N(int32(limit))) * rand.Float64()
-
-		switch f {
-		case "exp":
-			values[i] = strconv.FormatFloat(multiplier, 'e', tail, 64)
-		case "float":
-			values[i] = strconv.FormatFloat(multiplier, 'f', tail, 64)
-		case "int":
-			values[i] = strconv.Itoa(int(multiplier))
-		}
-	}
-
-	return &CycBuffer{
-		MName:   f,
-		Values:  values,
-		MaxSize: maxSize,
-		Index:   0,
-	}
-}
-
 // RandBuffers is the engine for building random data buffers.
 // Each of these can be queried by the endpoint to get well-defined random numbers.
 // It grabs new ones every time to create better randomness.
@@ -98,12 +107,12 @@ func (eph *EPHandle) RandBuffers() {
 
 	for _, mt := range eph.MTypes {
 		mt.MU.Lock()
-		bufferExp := NewRandCycBuffer(sizeR, limitR, tailR, modR, mt.Name)
+		buffer := NewShiftCycBuffer(sizeR, limitR, tailR, modR, mt.Name, "random")
 
-		bufferExp.MU.Lock()
-		eph.MTypes[mt.Name].RandomBuffer = bufferExp.Values
+		buffer.MU.Lock()
+		eph.MTypes[mt.Name].RandomBuffer = buffer.Values
 
-		bufferExp.MU.Unlock()
+		buffer.MU.Unlock()
 		mt.MU.Unlock()
 	}
 }
@@ -114,7 +123,7 @@ func (eph *EPHandle) ShiftBuffers() {
 	// Run a Shift() on all CyclicBuffers
 	// This advances buffer.Index along the algorithm
 	for _, mt := range eph.MTypes {
-		for _, buff := range mt.CyclicBuffer {
+		for _, buff := range mt.ShiftRegisters {
 			buff.Shift()
 		}
 	}
@@ -141,7 +150,7 @@ func FillEnvVarInt(ev string, def int) int {
 
 	value, err := strconv.Atoi(fetch)
 	if err != nil || value < 0 {
-		slog.Info("Invalid environment variable " + ev)
+		slog.Warn("Invalid environment variable " + ev)
 		return def
 	}
 	return value

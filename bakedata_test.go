@@ -22,7 +22,7 @@ func TestNewRandCycBuffer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			get := NewRandCycBuffer(tt.size, tt.limit, tt.tail, tt.mod, tt.format)
+			get := NewShiftCycBuffer(tt.size, tt.limit, tt.tail, tt.mod, tt.format, "random")
 			got := get.Values
 			for _, v := range got {
 				// The value is random, it won't be useful to test,
@@ -34,7 +34,7 @@ func TestNewRandCycBuffer(t *testing.T) {
 	}
 }
 
-func TestCycBuffer_Shift(t *testing.T) {
+func TestCycBuffer_ShiftRegister(t *testing.T) {
 	tests := []struct {
 		name   string
 		size   int
@@ -42,17 +42,20 @@ func TestCycBuffer_Shift(t *testing.T) {
 		tail   int
 		mod    float64
 		format string
+		algo   string
 	}{
-		{name: "Returns integers going up", size: 10, limit: 10, tail: 1, mod: 1.1, format: "up"},
-		{name: "Returns floats going up", size: 10, limit: 10, tail: 1, mod: 1.1, format: "floatup"},
-		{name: "Returns integers going down", size: 10, limit: 10, tail: 1, mod: 1.1, format: "down"},
-		{name: "Returns floats going down", size: 10, limit: 10, tail: 1, mod: 1.1, format: "floatdown"},
+		{name: "Returns integers going up", size: 5, limit: 100, tail: 1, mod: 100, format: "int", algo: "up"},
+		{name: "Returns integers going down", size: 5, limit: 100, tail: 1, mod: 100, format: "int", algo: "down"},
+		{name: "Returns floats going up", size: 10, limit: 10, tail: 1, mod: 1.1, format: "float", algo: "up"},
+		{name: "Returns floats going down", size: 10, limit: 10, tail: 1, mod: 1.1, format: "float", algo: "down"},
+		{name: "Returns exponentials going up", size: 10, limit: 10000, tail: 1, mod: 100.1, format: "exp", algo: "up"},
+		{name: "Returns exponentials going down", size: 10, limit: 10000, tail: 1, mod: 100.1, format: "exp", algo: "down"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			shifter := NewShiftCycBuffer(tt.size, tt.limit, tt.tail, tt.mod, tt.format)
-			for i := 0; i < 10; i++ {
+			shifter := NewShiftCycBuffer(tt.size, tt.limit, tt.tail, tt.mod, tt.format, tt.algo)
+			for i := 0; i < 5; i++ {
 				t.Log(shifter.Values[i])
 				nextIdx := (shifter.Index + 1) % shifter.MaxSize
 				before := shifter.Values[shifter.Index]
@@ -64,6 +67,58 @@ func TestCycBuffer_Shift(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCycBuffer_ShiftRandomizer(t *testing.T) {
+	tests := []struct {
+		name   string
+		size   int
+		limit  int
+		tail   int
+		mod    float64
+		format string
+		algo   string
+	}{
+		{name: "Returns random exp", size: 5, limit: 5000, tail: 1, mod: 5000, format: "exp", algo: "random"},
+		{name: "Returns random float", size: 5, limit: 100, tail: 1, mod: 1, format: "float", algo: "random"},
+		{name: "Returns random int", size: 5, limit: 100, tail: 1, mod: 1, format: "int", algo: "random"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			get := NewShiftCycBuffer(tt.size, tt.limit, tt.tail, tt.mod, tt.format, tt.algo)
+			got := get.Values
+			for _, v := range got {
+				vf, err := strconv.ParseFloat(v, 64)
+				assertError(t, err, nil)
+				vi := int(vf)
+				t.Log(vf, vi)
+
+				if vi < 0 || vi > (tt.limit*int(tt.mod)) {
+					t.Errorf("Expected %T to be under limit (%d * %T)", vi, tt.limit, tt.mod)
+				}
+			}
+		})
+	}
+
+}
+
+func TestEPHandle_RandBuffers(t *testing.T) {
+	eph := NewEPHandle([]string{"exp", "float", "int"}, []string{"up", "down"})
+	defer eph.Ticker.Stop()
+
+	// Choose a non-default value
+	os.Setenv("RAND_SIZE", "10")
+
+	eph.RandBuffers()
+
+	for _, mt := range eph.MTypes {
+		if len(mt.RandomBuffer) != 10 {
+			t.Errorf("Random buffer length should be 10, got %d", len(mt.RandomBuffer))
+		}
+		t.Log(mt.RandomBuffer)
+	}
+
 }
 
 func TestFillEnvVarInt(t *testing.T) {

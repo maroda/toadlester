@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,33 +22,34 @@ type EPHandle struct {
 }
 
 type MType struct {
-	MU           sync.Mutex
-	Name         string       // Metric name
-	RandomBuffer []string     // Randomized metrics, key: name
-	CyclicBuffer []*CycBuffer // Cyclical metric series, key: name
+	MU             sync.Mutex
+	Name           string                // Metric name
+	RandomBuffer   []string              // Randomized metrics
+	ShiftRegisters map[string]*CycBuffer // Map of Cyclical Buffers
 }
 
 // NewEPHandle initializes MetricTypes, Buffers, and the Ticker.
 // Server and Mux are done by calling func.
 //
 //	mtype = "exp", "float", "int"
-//	buffers = "up", "down", "floatup", "floatdown"
-func NewEPHandle(mtypes, buffers []string) *EPHandle {
+//	buffer algos = "up", "down", "floatup", "floatdown"
+func NewEPHandle(mtypes, balgos []string) *EPHandle {
 	names := make(map[string]*MType)
 
 	// Init each type with its name
 	for _, mt := range mtypes {
 		names[mt] = &MType{
-			Name:         mt,
-			RandomBuffer: make([]string, len(buffers)),
-			CyclicBuffer: make([]*CycBuffer, 0),
+			Name:           mt,
+			RandomBuffer:   make([]string, len(balgos)),
+			ShiftRegisters: make(map[string]*CycBuffer),
 		}
 	}
 
 	// Init each cyclical shift register for every existing mtype
-	for _, buff := range buffers { // algorithms belong to buffers
+	for _, algo := range balgos { // algorithms belong to buffers
 		for _, mt := range mtypes { // numeric types belong to mtypes
 			// Values in series that result from functions that fire when called
+			// Series of monotonic values
 			size := FillEnvVarInt(strings.ToUpper(mt)+"_SIZE", 10)
 			limit := FillEnvVarInt(strings.ToUpper(mt)+"_LIMIT", 10)
 			tail := FillEnvVarInt(strings.ToUpper(mt)+"_TAIL", 1)
@@ -60,11 +60,24 @@ func NewEPHandle(mtypes, buffers []string) *EPHandle {
 				mod = 10000
 			}
 
-			newCbuff := NewShiftCycBuffer(size, limit, tail, mod, buff)
-			names[mt].CyclicBuffer = append(names[mt].CyclicBuffer, newCbuff)
+			slog.Debug("INIT SHIFT REGISTER",
+				slog.String("name", mt),
+				slog.Int("size", size),
+				slog.Int("limit", limit),
+				slog.Int("tail", tail),
+				slog.Any("mod", mod),
+				slog.Any("algo", algo))
 
-			// Static Random values that can be changed by external processes
-			sizeR := FillEnvVarInt("RAND_SIZE", 10)
+			newCbuff := NewShiftCycBuffer(size, limit, tail, mod, mt, algo)
+			names[mt].ShiftRegisters[algo] = newCbuff
+
+			slog.Debug("GOT SHIFT REGISTER",
+				slog.String("name", mt),
+				slog.Any("buffer", names[mt].ShiftRegisters[algo]))
+
+			// Static Random values
+			algoR := "random"
+			sizeR := FillEnvVarInt("RAND_SIZE", 1)
 			limitR := FillEnvVarInt("RAND_LIMIT", 10000)
 			tailR := FillEnvVarInt("RAND_TAIL", 1)
 			modRenv := FillEnvVar("RAND_MOD")
@@ -74,8 +87,20 @@ func NewEPHandle(mtypes, buffers []string) *EPHandle {
 				modR = 10000
 			}
 
-			newRbuff := NewRandCycBuffer(sizeR, limitR, tailR, modR, buff)
+			slog.Debug("INIT RANDOMIZER",
+				slog.String("name", mt),
+				slog.Int("size", sizeR),
+				slog.Int("limit", limitR),
+				slog.Int("tail", tailR),
+				slog.Any("mod", modR),
+				slog.Any("algo", algoR))
+
+			newRbuff := NewShiftCycBuffer(sizeR, limitR, tailR, modR, mt, algoR)
 			names[mt].RandomBuffer = newRbuff.Values
+
+			slog.Debug("GOT RANDOMIZER",
+				slog.String("name", mt),
+				slog.Any("buffer", newRbuff))
 		}
 	}
 
@@ -88,13 +113,31 @@ func NewEPHandle(mtypes, buffers []string) *EPHandle {
 func (eph *EPHandle) SetupMux() *mux.Router {
 	r := mux.NewRouter()
 
-	r.HandleFunc("/ep/kv", KVdataHandler)
-	r.HandleFunc("/ep/json", JSONdataHandler)
 	r.HandleFunc("/rand/all", eph.RandDataAllHandler)
 
 	r.PathPrefix("/series").HandlerFunc(eph.SeriesInternalDataHandler)
 
 	return r
+}
+
+func (eph *EPHandle) findTypeKey(find string) bool {
+	for k, _ := range eph.MTypes {
+		if k == find {
+			return true
+		}
+	}
+	return false
+}
+
+func (eph *EPHandle) findAlgoKey(find string) bool {
+	for _, t := range eph.MTypes {
+		for _, b := range t.ShiftRegisters {
+			if b.MAlgo == find {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (eph *EPHandle) SeriesInternalDataHandler(w http.ResponseWriter, r *http.Request) {
@@ -105,45 +148,39 @@ func (eph *EPHandle) SeriesInternalDataHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// align algorithm with buffer contents
-	algotype := parts[2]      // numeric type (exp, float, int)
-	algo := parts[3]          // algorithm name (up, down, upfloat, downfloat)
-	useCBAlgo := &CycBuffer{} // buffer to hold match
-	for _, mt := range eph.MTypes {
-		for _, buff := range mt.CyclicBuffer {
-			if buff.MName == algo {
-				useCBAlgo = buff
-				break
-			}
-		}
+	algotype := parts[2] // numeric type (exp, float, int)
+	algo := parts[3]     // algorithm name (up, down)
+
+	if !eph.findTypeKey(algotype) {
+		slog.Error("Invalid series data path: " + algotype)
+		http.Error(w, "Invalid series data path: "+algotype, http.StatusBadRequest)
+		return
 	}
 
-	useCBAlgo.MU.Lock()
-	algoVal := useCBAlgo.Values[useCBAlgo.Index]
-	useCBAlgo.MU.Unlock()
+	if !eph.findAlgoKey(algo) {
+		slog.Error("Invalid series data path:" + algo)
+		http.Error(w, "Invalid series data path: "+algo, http.StatusBadRequest)
+		return
+	}
+
+	// assign buffer as shift register
+	shiftReg := eph.MTypes[algotype].ShiftRegisters[algo]
+	shiftReg.MU.Lock()
+	algoVal := shiftReg.Values[shiftReg.Index]
+	shiftReg.MU.Unlock()
 
 	slog.Info("algorithm match",
 		slog.String("method", r.Method),
 		slog.String("request", r.RequestURI),
 		slog.String("requested.type", algotype),
-		slog.String("algo.name", useCBAlgo.MName),
+		slog.String("algo.name", shiftReg.MAlgo),
 		slog.String("algo.value", algoVal),
-		slog.Any("full.values", useCBAlgo.Values),
+		slog.Any("full.values", shiftReg.Values),
 	)
 
 	w.Header().Set("Content-Type", "application/plaintext")
-	output := fmt.Sprintf("Metric_%s: %s\n", algotype, algoVal)
+	output := fmt.Sprintf("Metric_%s_%s: %s\n", algotype, algo, algoVal)
 	w.Write([]byte(output))
-}
-
-func KVdataHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/plaintext")
-	w.Write([]byte("HelloWorld: 69"))
-}
-
-func JSONdataHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	json.NewEncoder(w).Encode(map[string]string{"HelloWorld": "69"})
 }
 
 // RandDataAllHandler returns randomly changing values in all supported types

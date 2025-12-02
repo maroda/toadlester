@@ -8,49 +8,23 @@ import (
 	"testing"
 )
 
-func TestSetupMux_ResponseCodes(t *testing.T) {
+func TestSetupMux_Data(t *testing.T) {
 	eph := NewEPHandle([]string{"exp", "float", "int"}, []string{"up", "down"})
 	defer eph.Ticker.Stop()
 	mux := eph.SetupMux()
 
-	tests := []struct {
-		name     string
-		target   string
-		wantCode int
-	}{
-		{name: "KV static data answers", target: "/ep/kv", wantCode: http.StatusOK},
-		{name: "JSON static data answers", target: "/ep/json", wantCode: http.StatusOK},
-		{name: "Randomized data answers", target: "/rand/all", wantCode: http.StatusOK},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := httptest.NewRequest("GET", tt.target, nil)
-			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, r)
-			assertStatus(t, w.Code, tt.wantCode)
-		})
-	}
-}
-
-func TestSetupMux_Data(t *testing.T) {
-	eph := NewEPHandle([]string{"exp", "float", "int"}, []string{"up", "down", "floatup", "floatdown"})
-	defer eph.Ticker.Stop()
-	mux := eph.SetupMux()
-
-	// Do not test actual values because they change based on access and timing
+	// Do not test actual values because they are randomized
 	tests := []struct {
 		name     string
 		target   string
 		wantCode int
 		expect   string
 	}{
-		{name: "Exponent Walk Up", target: "/series/exp/up", wantCode: http.StatusOK, expect: "Metric_exp: "},
-		{name: "Exponent Walk Down", target: "/series/exp/down", wantCode: http.StatusOK, expect: "Metric_exp: "},
-		{name: "Float Walk Up", target: "/series/float/floatup", wantCode: http.StatusOK, expect: "Metric_float: "},
-		{name: "Float Walk Down", target: "/series/float/floatdown", wantCode: http.StatusOK, expect: "Metric_float: "},
-		{name: "Integer Walk Up", target: "/series/int/up", wantCode: http.StatusOK, expect: "Metric_int: "},
-		{name: "Integer Walk Down", target: "/series/int/down", wantCode: http.StatusOK, expect: "Metric_int: "},
+		{name: "Randomizer", target: "/rand/all", wantCode: http.StatusOK, expect: "ExpMetric: "},
+		{name: "Exponent Walk Up", target: "/series/exp/up", wantCode: http.StatusOK, expect: "Metric_exp_up: "},
+		{name: "Exponent Walk Down", target: "/series/exp/down", wantCode: http.StatusOK, expect: "Metric_exp_down: "},
+		{name: "Integer Walk Up", target: "/series/int/up", wantCode: http.StatusOK, expect: "Metric_int_up: "},
+		{name: "Integer Walk Down", target: "/series/int/down", wantCode: http.StatusOK, expect: "Metric_int_down: "},
 	}
 
 	for _, tt := range tests {
@@ -62,6 +36,49 @@ func TestSetupMux_Data(t *testing.T) {
 			assertStringContains(t, w.Body.String(), tt.expect)
 		})
 	}
+}
+
+func TestEPHandle_SeriesInternalDataHandler(t *testing.T) {
+	eph := NewEPHandle([]string{"exp", "float", "int"}, []string{"up", "down"})
+	defer eph.Ticker.Stop()
+	mux := eph.SetupMux()
+
+	tests := []struct {
+		name     string
+		target   string
+		wantCode int
+	}{
+		{
+			name:     "Logs Error for bad Type",
+			target:   "/series/ex/up",
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "Logs Error for bad Algo",
+			target:   "/series/exp/u",
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "Logs Error for too few elements",
+			target:   "/series/exp/",
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "Logs Error for too many elements",
+			target:   "/series/exp/up/for/ever",
+			wantCode: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", tt.target, nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+			assertStatus(t, w.Code, tt.wantCode)
+		})
+	}
+
 }
 
 // Helpers //

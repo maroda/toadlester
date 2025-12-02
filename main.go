@@ -7,10 +7,10 @@ import (
 )
 
 func main() {
-	eph := NewEPHandle([]string{"exp", "float", "int"}, []string{"up", "down", "floatup", "floatdown"})
+	eph := NewEPHandle(
+		[]string{"exp", "float", "int"}, // Numeric Types
+		[]string{"up", "down"})          // Display Algorithms
 	defer eph.Ticker.Stop()
-
-	// Use config env vars to set up buffers
 
 	// Run webserver in parallel to metric creation
 	go func() {
