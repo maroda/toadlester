@@ -30,9 +30,6 @@ type MType struct {
 
 // NewEPHandle initializes MetricTypes, Buffers, and the Ticker.
 // Server and Mux are done by calling func.
-//
-//	mtype = "exp", "float", "int"
-//	buffer algos = "up", "down", "floatup", "floatdown"
 func NewEPHandle(mtypes, balgos []string) *EPHandle {
 	names := make(map[string]*MType)
 
@@ -45,62 +42,24 @@ func NewEPHandle(mtypes, balgos []string) *EPHandle {
 		}
 	}
 
-	// Init each cyclical shift register for every existing mtype
+	// Init each cyclical shift register for every existing mtype and random
 	for _, algo := range balgos { // algorithms belong to buffers
 		for _, mt := range mtypes { // numeric types belong to mtypes
-			// Values in series that result from functions that fire when called
 			// Series of monotonic values
-			size := FillEnvVarInt(strings.ToUpper(mt)+"_SIZE", 10)
-			limit := FillEnvVarInt(strings.ToUpper(mt)+"_LIMIT", 10)
-			tail := FillEnvVarInt(strings.ToUpper(mt)+"_TAIL", 1)
-			modenv := FillEnvVar(strings.ToUpper(mt) + "_MOD")
-			mod, err := strconv.ParseFloat(modenv, 64)
-			if err != nil {
-				slog.Warn("Default chosen instead of: " + modenv)
-				mod = 10000
-			}
-
-			slog.Debug("INIT SHIFT REGISTER",
-				slog.String("name", mt),
-				slog.Int("size", size),
-				slog.Int("limit", limit),
-				slog.Int("tail", tail),
-				slog.Any("mod", mod),
-				slog.Any("algo", algo))
-
-			newCbuff := NewShiftCycBuffer(size, limit, tail, mod, mt, algo)
-			names[mt].ShiftRegisters[algo] = newCbuff
+			newBuff := getConfiguredBuffer(mt, algo)
+			names[mt].ShiftRegisters[algo] = newBuff
 
 			slog.Debug("GOT SHIFT REGISTER",
 				slog.String("name", mt),
 				slog.Any("buffer", names[mt].ShiftRegisters[algo]))
 
 			// Static Random values
-			algoR := "random"
-			sizeR := FillEnvVarInt("RAND_SIZE", 1)
-			limitR := FillEnvVarInt("RAND_LIMIT", 10000)
-			tailR := FillEnvVarInt("RAND_TAIL", 1)
-			modRenv := FillEnvVar("RAND_MOD")
-			modR, err := strconv.ParseFloat(modRenv, 64)
-			if err != nil {
-				slog.Warn("Default chosen instead of: " + modRenv)
-				modR = 10000
-			}
-
-			slog.Debug("INIT RANDOMIZER",
-				slog.String("name", mt),
-				slog.Int("size", sizeR),
-				slog.Int("limit", limitR),
-				slog.Int("tail", tailR),
-				slog.Any("mod", modR),
-				slog.Any("algo", algoR))
-
-			newRbuff := NewShiftCycBuffer(sizeR, limitR, tailR, modR, mt, algoR)
-			names[mt].RandomBuffer = newRbuff.Values
+			newRandomizer := getRandomizedBuffer(mt, "random")
+			names[mt].RandomBuffer = newRandomizer.Values
 
 			slog.Debug("GOT RANDOMIZER",
 				slog.String("name", mt),
-				slog.Any("buffer", newRbuff))
+				slog.Any("buffer", names[mt].RandomBuffer))
 		}
 	}
 
@@ -110,18 +69,92 @@ func NewEPHandle(mtypes, balgos []string) *EPHandle {
 	}
 }
 
+// SetupMux provides a new Mux with its internal routing configured
+// These are the control points for Toadlester
 func (eph *EPHandle) SetupMux() *mux.Router {
 	r := mux.NewRouter()
 
 	r.HandleFunc("/rand/all", eph.RandDataAllHandler)
-
+	r.HandleFunc("/reset", eph.ResetHandler)
+	r.HandleFunc("/metrics", eph.SeriesDataAllHandler)
 	r.PathPrefix("/series").HandlerFunc(eph.SeriesInternalDataHandler)
 
 	return r
 }
 
+// ResetHandler sets new values for each shift register buffer
+func (eph *EPHandle) ResetHandler(w http.ResponseWriter, r *http.Request) {
+	var output string
+	for _, mt := range eph.MTypes {
+		for _, buff := range mt.ShiftRegisters {
+			buff.MU.Lock()
+			newBuff := getConfiguredBuffer(buff.NType, buff.MAlgo)
+			buff.Values = newBuff.Values
+			buff.MU.Unlock()
+		}
+		output = output + fmt.Sprintf("Reset values to new series for %q\n", mt.Name)
+	}
+
+	slog.Info("Reset complete",
+		slog.String("method", r.Method),
+		slog.String("request", r.RequestURI),
+		slog.String("remote_addr", r.RemoteAddr),
+		slog.Any("types", eph.MTypes))
+
+	w.Header().Set("Content-Type", "application/plaintext")
+	w.Write([]byte(output))
+}
+
+// Series of monotonic values
+func getConfiguredBuffer(mt, algo string) *CycBuffer {
+	size := FillEnvVarInt(strings.ToUpper(mt)+"_SIZE", 10)
+	limit := FillEnvVarInt(strings.ToUpper(mt)+"_LIMIT", 10)
+	tail := FillEnvVarInt(strings.ToUpper(mt)+"_TAIL", 1)
+	modenv := FillEnvVar(strings.ToUpper(mt) + "_MOD")
+	mod, err := strconv.ParseFloat(modenv, 64)
+	if err != nil {
+		slog.Warn("Default chosen",
+			slog.String("mod", modenv))
+		mod = 1
+	}
+
+	slog.Debug("INIT SHIFT REGISTER",
+		slog.String("name", mt),
+		slog.Int("size", size),
+		slog.Int("limit", limit),
+		slog.Int("tail", tail),
+		slog.Any("mod", mod),
+		slog.Any("algo", algo))
+
+	return NewShiftCycBuffer(size, limit, tail, mod, mt, algo)
+}
+
+// Static Random values
+func getRandomizedBuffer(mt, algo string) *CycBuffer {
+	size := FillEnvVarInt("RAND_SIZE", 1)
+	limit := FillEnvVarInt("RAND_LIMIT", 10000)
+	tail := FillEnvVarInt("RAND_TAIL", 4)
+	modenv := FillEnvVar("RAND_MOD")
+	mod, err := strconv.ParseFloat(modenv, 64)
+	if err != nil {
+		slog.Warn("Default chosen",
+			slog.String("mod", modenv))
+		mod = 10000
+	}
+
+	slog.Debug("INIT RANDOMIZER",
+		slog.String("name", mt),
+		slog.Int("size", size),
+		slog.Int("limit", limit),
+		slog.Int("tail", tail),
+		slog.Any("mod", mod),
+		slog.Any("algo", algo))
+
+	return NewShiftCycBuffer(size, limit, tail, mod, mt, algo)
+}
+
 func (eph *EPHandle) findTypeKey(find string) bool {
-	for k, _ := range eph.MTypes {
+	for k := range eph.MTypes {
 		if k == find {
 			return true
 		}
@@ -140,6 +173,7 @@ func (eph *EPHandle) findAlgoKey(find string) bool {
 	return false
 }
 
+// SeriesInternalDataHandler returns a metric from the series and algorithm requested
 func (eph *EPHandle) SeriesInternalDataHandler(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) != 4 {
@@ -169,24 +203,53 @@ func (eph *EPHandle) SeriesInternalDataHandler(w http.ResponseWriter, r *http.Re
 	algoVal := shiftReg.Values[shiftReg.Index]
 	shiftReg.MU.Unlock()
 
-	slog.Info("algorithm match",
+	slog.Info("Algorithm match",
 		slog.String("method", r.Method),
 		slog.String("request", r.RequestURI),
+		slog.String("remote_addr", r.RemoteAddr),
 		slog.String("requested.type", algotype),
 		slog.String("algo.name", shiftReg.MAlgo),
 		slog.String("algo.value", algoVal),
 		slog.Any("full.values", shiftReg.Values),
 	)
 
-	w.Header().Set("Content-Type", "application/plaintext")
+	w.Header().Set("Content-Type", "application/plaintext; charset=utf-8")
 	output := fmt.Sprintf("Metric_%s_%s: %s\n", algotype, algo, algoVal)
+	w.Write([]byte(output))
+}
+
+func (eph *EPHandle) SeriesDataAllHandler(w http.ResponseWriter, r *http.Request) {
+	report := map[string]string{}
+	var output string
+
+	for _, mt := range eph.MTypes {
+		mt.MU.Lock()
+		for _, buff := range mt.ShiftRegisters {
+			idx := buff.NType + buff.MAlgo
+			report[idx] = buff.Values[buff.Index]
+			output = output + fmt.Sprintf("Metric_%s_%s: %s\n",
+				buff.NType, buff.MAlgo, report[idx])
+		}
+		mt.MU.Unlock()
+	}
+
+	slog.Info("Randomizer match",
+		slog.String("method", r.Method),
+		slog.String("request", r.RequestURI),
+		slog.String("remote_addr", r.RemoteAddr),
+		slog.String("expup", report["expup"]),
+		slog.String("floatup", report["floatup"]),
+		slog.String("intup", report["intup"]),
+		slog.String("expdown", report["expdown"]),
+		slog.String("floatdown", report["floatdown"]),
+		slog.String("intdown", report["intdown"]))
+
+	w.Header().Set("Content-Type", "application/plaintext; charset=utf-8")
 	w.Write([]byte(output))
 }
 
 // RandDataAllHandler returns randomly changing values in all supported types
 func (eph *EPHandle) RandDataAllHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/plaintext; charset=utf-8")
-
 	for _, mt := range eph.MTypes {
 		mt.MU.Lock()
 	}
@@ -197,14 +260,16 @@ func (eph *EPHandle) RandDataAllHandler(w http.ResponseWriter, r *http.Request) 
 		mt.MU.Unlock()
 	}
 
-	slog.Info("randomizer match",
+	slog.Info("Randomizer match",
 		slog.String("method", r.Method),
 		slog.String("request", r.RequestURI),
+		slog.String("remote_addr", r.RemoteAddr),
 		slog.String("random.exponent", randexp),
 		slog.String("random.float", randfloat),
 		slog.String("random.integer", randint),
 	)
 
+	w.Header().Set("Content-Type", "application/plaintext; charset=utf-8")
 	output := fmt.Sprintf("ExpMetric: %s\nFloatMetric: %s\nIntMetric: %s\n", randexp, randfloat, randint)
 	w.Write([]byte(output))
 }

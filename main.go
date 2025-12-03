@@ -6,10 +6,16 @@ import (
 	"net/http"
 )
 
+// Global vars for easy access to reset during operation.
+// Currently, not meant to be user-configurable.
+// Only use these to control NewEPHandle.
+var (
+	NTypes = []string{"exp", "float", "int"} // Numeric Types
+	MAlgos = []string{"up", "down"}          // Display Algorithms
+)
+
 func main() {
-	eph := NewEPHandle(
-		[]string{"exp", "float", "int"}, // Numeric Types
-		[]string{"up", "down"})          // Display Algorithms
+	eph := NewEPHandle(NTypes, MAlgos)
 	defer eph.Ticker.Stop()
 
 	// Run webserver in parallel to metric creation

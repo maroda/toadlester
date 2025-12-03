@@ -81,6 +81,33 @@ func TestEPHandle_SeriesInternalDataHandler(t *testing.T) {
 
 }
 
+func TestEPHandle_SeriesDataAllHandler(t *testing.T) {
+	eph := NewEPHandle([]string{"exp", "float", "int"}, []string{"up", "down"})
+	defer eph.Ticker.Stop()
+	mux := eph.SetupMux()
+
+	tests := []struct {
+		name     string
+		target   string
+		wantCode int
+	}{
+		{
+			name:     "Retrieves full metrics page",
+			target:   "/metrics",
+			wantCode: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", tt.target, nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+			assertStatus(t, w.Code, tt.wantCode)
+		})
+	}
+}
+
 // Helpers //
 
 func assertError(t testing.TB, got, want error) {

@@ -96,22 +96,11 @@ func (cb *CycBuffer) Shift() string {
 // Each of these can be queried by the endpoint to get well-defined random numbers.
 // It grabs new ones every time to create better randomness.
 func (eph *EPHandle) RandBuffers() {
-	sizeR := FillEnvVarInt("RAND_SIZE", 4)
-	limitR := FillEnvVarInt("RAND_LIMIT", 10000)
-	tailR := FillEnvVarInt("RAND_TAIL", 8)
-	modRenv := FillEnvVar("RAND_MOD")
-	modR, err := strconv.ParseFloat(modRenv, 64)
-	if err != nil {
-		modR = 10000
-	}
-
 	for _, mt := range eph.MTypes {
 		mt.MU.Lock()
-		buffer := NewShiftCycBuffer(sizeR, limitR, tailR, modR, mt.Name, "random")
-
+		buffer := getRandomizedBuffer(mt.Name, "random")
 		buffer.MU.Lock()
 		eph.MTypes[mt.Name].RandomBuffer = buffer.Values
-
 		buffer.MU.Unlock()
 		mt.MU.Unlock()
 	}
