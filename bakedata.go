@@ -18,41 +18,50 @@ type CycBuffer struct {
 	Index   int      // We are at this index in the step buffer
 }
 
-// NewShiftCycBuffer creates cascading values to be shifted by one for each access
+// NewShiftCycBuffer creates a series of values based on ENV VAR configurations.
+// These number generators are multiplicative and random
+// to provide some ambiguity within the number series
+// so it isn't always a set of evenly spaced values.
 func NewShiftCycBuffer(maxSize, limit, tail int, mod float64, f, a string) *CycBuffer {
 	values := make([]string, 0, maxSize)
-	saltF := mod * float64(rand.Int32N(int32(limit))) * rand.Float64()
-	saltI := int(mod) * int(saltF)
+
+	saltF := mod * float64(rand.Int32N(int32(limit))+1) // Seed using *_MOD and *_LIMIT (normalized to 1)
+	saltM := rand.Float64() + 0.1                       // SaltMultiplier, internally randomized (normalized to 0.1)
+	saltF *= saltM                                      // Float salt
+	saltI := int(mod) * int(saltF)                      // Int salt
+	if saltI == 0 {
+		saltI = 1
+	}
 
 	switch a {
 	case "up":
 		switch f {
 		case "exp":
 			for i := 0; i < maxSize; i++ {
-				values = append(values, strconv.FormatFloat(saltF*float64(limit-(limit-(tail*i)))*mod, 'e', 8, 64))
+				values = append(values, strconv.FormatFloat(saltF*float64(limit-(limit-i))*mod, 'e', tail, 64))
 			}
 		case "float":
 			for i := 0; i < maxSize; i++ {
-				values = append(values, strconv.FormatFloat(saltF*float64(limit-(limit-(tail*i)))*mod, 'f', 8, 64))
+				values = append(values, strconv.FormatFloat(saltF*float64(limit-(limit-i))*mod, 'f', tail, 64))
 			}
 		case "int":
 			for i := 0; i < maxSize; i++ {
-				values = append(values, strconv.Itoa(saltI*(limit-(limit-(tail*i)))))
+				values = append(values, strconv.Itoa(saltI*(limit-(limit-i))))
 			}
 		}
 	case "down":
 		switch f {
 		case "exp":
 			for i := 0; i < maxSize; i++ {
-				values = append(values, strconv.FormatFloat(saltF*float64(limit-(tail*i))*mod, 'e', 8, 64))
+				values = append(values, strconv.FormatFloat(saltF*float64(limit-i)*mod, 'e', tail, 64))
 			}
 		case "float":
 			for i := 0; i < maxSize; i++ {
-				values = append(values, strconv.FormatFloat(saltF*float64(limit-(tail*i))*mod, 'f', 8, 64))
+				values = append(values, strconv.FormatFloat(saltF*float64(limit-i)*mod, 'f', tail, 64))
 			}
 		case "int":
 			for i := 0; i < maxSize; i++ {
-				values = append(values, strconv.Itoa(saltI*(limit-(tail*i))))
+				values = append(values, strconv.Itoa(saltI*(limit-i)))
 			}
 		}
 	case "random":

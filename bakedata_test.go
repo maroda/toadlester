@@ -34,6 +34,22 @@ func TestNewRandCycBuffer(t *testing.T) {
 	}
 }
 
+func TestEPHandle_ShiftBuffers(t *testing.T) {
+	eph := NewEPHandle([]string{"exp", "float", "int"}, []string{"up", "down"})
+	defer eph.Ticker.Stop()
+
+	// Compare before and after shifting the buffer
+	for _, mt := range eph.MTypes {
+		sr := eph.MTypes[mt.Name].ShiftRegisters["up"]
+		beforeVal := sr.Values[sr.Index]
+		eph.ShiftBuffers()
+		afterVal := sr.Values[sr.Index]
+		if beforeVal == afterVal {
+			t.Errorf("Expected next value %s after shift, got %s", beforeVal, afterVal)
+		}
+	}
+}
+
 func TestCycBuffer_ShiftRegister(t *testing.T) {
 	tests := []struct {
 		name   string

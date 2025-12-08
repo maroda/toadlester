@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -104,6 +106,188 @@ func TestEPHandle_SeriesDataAllHandler(t *testing.T) {
 			w := httptest.NewRecorder()
 			mux.ServeHTTP(w, r)
 			assertStatus(t, w.Code, tt.wantCode)
+		})
+	}
+}
+
+func TestEPHandle_ResetHandler(t *testing.T) {
+	eph := NewEPHandle([]string{"exp", "float", "int"}, []string{"up", "down"})
+	defer eph.Ticker.Stop()
+	mux := eph.SetupMux()
+
+	tests := []struct {
+		name     string
+		target   string
+		wantCode int
+		mtype    string
+		typecnf  string
+		envvar   string
+		oldval   string
+		newval   string
+	}{
+		{
+			name:     "Path is too short",
+			target:   "/reset/INT_SIZE",
+			wantCode: http.StatusBadRequest,
+			mtype:    "int",
+			typecnf:  "size",
+			envvar:   "INT_SIZE",
+			oldval:   strconv.Itoa(defSize),
+			newval:   "10",
+		},
+		{
+			name:     "Path is too long",
+			target:   "/reset/INT_SIZE/11/ok",
+			wantCode: http.StatusBadRequest,
+			mtype:    "int",
+			typecnf:  "size",
+			envvar:   "INT_SIZE",
+			oldval:   strconv.Itoa(defSize),
+			newval:   "10",
+		},
+		{
+			name:     "No such env var",
+			target:   "/reset/ONT_SIZE/11",
+			wantCode: http.StatusBadRequest,
+			mtype:    "int",
+			typecnf:  "size",
+			envvar:   "ONT_SIZE",
+			oldval:   strconv.Itoa(defSize),
+			newval:   "10",
+		},
+		{
+			name:     "Reset Int Size",
+			target:   "/reset/INT_SIZE/11",
+			wantCode: http.StatusOK,
+			mtype:    "int",
+			typecnf:  "size",
+			envvar:   "INT_SIZE",
+			oldval:   strconv.Itoa(defSize),
+			newval:   "11",
+		},
+		{
+			name:     "Reset Int Limit",
+			target:   "/reset/INT_LIMIT/22",
+			wantCode: http.StatusOK,
+			mtype:    "int",
+			typecnf:  "limit",
+			envvar:   "INT_LIMIT",
+			oldval:   strconv.Itoa(defLimit),
+			newval:   "22",
+		},
+		{
+			name:     "Reset Float Tail",
+			target:   "/reset/FLOAT_TAIL/8",
+			wantCode: http.StatusOK,
+			mtype:    "float",
+			typecnf:  "tail",
+			envvar:   "FLOAT_TAIL",
+			oldval:   strconv.Itoa(defTail),
+			newval:   "8",
+		},
+		{
+			name:     "Reset Exp Tail",
+			target:   "/reset/EXP_TAIL/8",
+			wantCode: http.StatusOK,
+			mtype:    "exp",
+			typecnf:  "tail",
+			envvar:   "EXP_TAIL",
+			oldval:   strconv.Itoa(defTail),
+			newval:   "8",
+		},
+		{
+			name:     "Reset Exp Mod",
+			target:   "/reset/EXP_MOD/111.11",
+			wantCode: http.StatusOK,
+			mtype:    "exp",
+			typecnf:  "mod",
+			envvar:   "EXP_MOD",
+			oldval:   strconv.Itoa(defMod),
+			newval:   "111.11",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", tt.target, nil)
+			w := httptest.NewRecorder()
+
+			// Set the Env Var to the old value first to ensure it is changed
+			os.Setenv(tt.envvar, tt.oldval)
+
+			// Serving and fetching this endpoint will automatically reset the Env Var
+			mux.ServeHTTP(w, r)
+
+			// Now check if it was changed
+			assertStatus(t, w.Code, tt.wantCode)
+			if os.Getenv(tt.envvar) != tt.newval {
+				t.Errorf("Expected variable to change to %s, got %s", tt.newval, os.Getenv(tt.envvar))
+			}
+
+			// Check data for each type
+			switch tt.typecnf {
+			case "size":
+				// Size is a 1-to-1 relationship
+				newL := strconv.Itoa(len(eph.MTypes[tt.mtype].ShiftRegisters["up"].Values))
+				if newL != tt.newval {
+					t.Errorf("Expected values length to be %s, got %s", tt.newval, newL)
+				}
+			case "limit":
+				// LIMIT is not a literal limit, but part of a function
+				oldI, _ := strconv.Atoi(tt.oldval) // Lower bounds
+				newI, _ := strconv.Atoi(tt.newval) // New config
+				topI := newI << 4                  // Bitwise change to match algorithm output
+
+				ep := eph.MTypes[tt.mtype].ShiftRegisters["up"]
+				lastval := ep.Values[len(ep.Values)-1]
+				intval, err := strconv.Atoi(lastval)
+				assertError(t, err, nil)
+
+				// Value should lie within bounds
+				if intval < oldI || intval > topI {
+					t.Errorf("Expected value to be in range %d-%d, got %d", oldI, topI, intval)
+				}
+			case "tail":
+				// in a float is precision after the decimal,
+				// in an exponent it is the size of the mantissa.
+				ep := eph.MTypes[tt.mtype].ShiftRegisters["up"]
+				switch tt.mtype {
+				case "exp":
+					newI, _ := strconv.Atoi(tt.newval)
+					lastval := ep.Values[len(ep.Values)-1]
+					parts := strings.Split(lastval, "e")
+					mantissa := parts[0]
+					dotIndex := strings.Index(mantissa, ".")
+					floatPrecision := len(mantissa) - dotIndex - 1 // Chars after the mantissa dot
+					if floatPrecision != newI {
+						t.Errorf("Expected exponent to have mantissa %d, got %d", newI, floatPrecision)
+					}
+				case "float":
+					newI, _ := strconv.Atoi(tt.newval)
+					lastval := ep.Values[len(ep.Values)-1]
+					dotIndex := strings.Index(lastval, ".")
+					floatPrecision := len(lastval) - dotIndex - 1 // Chars after the decimal point
+					if floatPrecision != newI {
+						t.Errorf("Expected float to have precision %d, got %d", newI, floatPrecision)
+					}
+				}
+			case "mod":
+				// MOD is similar to LIMIT, but it is a float.
+				// They are used together to make big numbers.
+				oldF, _ := strconv.ParseFloat(tt.oldval, 64) // Lower bounds
+				newF, _ := strconv.ParseFloat(tt.newval, 64) // New config
+				topF := newF * newF * newF                   // Match algorithm output size
+
+				ep := eph.MTypes[tt.mtype].ShiftRegisters["up"]
+				lastval := ep.Values[len(ep.Values)-1]
+				floatval, err := strconv.ParseFloat(lastval, 64)
+				assertError(t, err, nil)
+
+				// Value should lie within bounds
+				if floatval < oldF || floatval > topF {
+					t.Errorf("Expected value to be in range %f-%f, got %f", oldF, topF, floatval)
+				}
+			}
 		})
 	}
 }

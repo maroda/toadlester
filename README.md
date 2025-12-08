@@ -90,8 +90,7 @@ RAND_TAIL=3
 RAND_MOD=500
 ```
 
-## TODO
+### Reset for New Values
 
-1. Temporal interval of metric - how much time between events - should be configurable. Right now, these are simple sinusoidal waveforms of metrics.
-2. Reset control to re-read configurations and/or have a way to update them while running
-
+Each of the configuration Env Vars can be changed while the app is running. For instance, `localhost:8899/reset/INT_SIZE/1000` changes the running `INT_SIZE` variable to `1000` and fills the buffer with a completely new set of values.
+In this case, such a setting will create a series of 1000 upwards integers for the `/series/int/*` endpoints.

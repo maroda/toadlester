@@ -4,12 +4,20 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
+)
+
+const (
+	defSize  = 10
+	defLimit = 10
+	defTail  = 1
+	defMod   = 1
 )
 
 // EPHandle is called by main() and contains the mux
@@ -75,47 +83,112 @@ func (eph *EPHandle) SetupMux() *mux.Router {
 	r := mux.NewRouter()
 
 	r.HandleFunc("/rand/all", eph.RandDataAllHandler)
-	r.HandleFunc("/reset", eph.ResetHandler)
 	r.HandleFunc("/metrics", eph.SeriesDataAllHandler)
+	r.PathPrefix("/reset").HandlerFunc(eph.ResetHandler)
 	r.PathPrefix("/series").HandlerFunc(eph.SeriesInternalDataHandler)
 
 	return r
 }
 
 // ResetHandler sets new values for each shift register buffer
+// It uses the final parameter of the API URI to set a new Env Var for that value.
+// Then a new buffer is requested, which reads Env Vars to configure.
 func (eph *EPHandle) ResetHandler(w http.ResponseWriter, r *http.Request) {
 	var output string
-	for _, mt := range eph.MTypes {
-		for _, buff := range mt.ShiftRegisters {
-			buff.MU.Lock()
-			newBuff := getConfiguredBuffer(buff.NType, buff.MAlgo)
-			buff.Values = newBuff.Values
-			buff.MU.Unlock()
-		}
-		output = output + fmt.Sprintf("Reset values to new series for %q\n", mt.Name)
+
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) != 4 {
+		slog.Error("Invalid reset data path")
+		http.Error(w, "Invalid reset data path", http.StatusBadRequest)
+		return
 	}
 
-	slog.Info("Reset complete",
-		slog.String("method", r.Method),
-		slog.String("request", r.RequestURI),
-		slog.String("remote_addr", r.RemoteAddr),
-		slog.Any("types", eph.MTypes))
+	envvar := parts[2] // numeric type (exp, float, int)
+	value := parts[3]  // algorithm name (up, down)
+
+	if !eph.findEnvVar(envvar) {
+		slog.Error("Invalid reset variable: " + envvar)
+		http.Error(w, "Invalid reset variable: "+envvar, http.StatusBadRequest)
+		return
+	}
+
+	// Set the env var being changed
+	// TODO: Value validation
+	os.Setenv(strings.ToUpper(envvar), value)
+
+	// Locate buffer with params and update with new Env Var set
+	params := strings.Split(envvar, "_")
+
+	mtype := strings.ToLower(params[0])
+	mconf := strings.ToLower(params[1])
+	slog.Debug("params", slog.String("mtype", mtype), slog.String("malgo", mconf))
+
+	// Get new buffers for all algorithms of this mtype
+	for _, buff := range eph.MTypes[mtype].ShiftRegisters {
+		// Hold on to history for logging
+		oldValues := buff.Values
+
+		// Get a new buffer
+		buff.MU.Lock()
+		newBuff := getConfiguredBuffer(buff.NType, buff.MAlgo)
+		buff.Values = newBuff.Values
+		buff.MU.Unlock()
+
+		output = output + fmt.Sprintf("Set new %s value %s for %s\n", buff.MAlgo, envvar, value)
+
+		slog.Info("Reset complete",
+			slog.String("method", r.Method),
+			slog.String("request", r.RequestURI),
+			slog.String("remote_addr", r.RemoteAddr),
+			slog.String("buffer", buff.MAlgo),
+			slog.String("old_values", strings.Join(oldValues, ", ")),
+			slog.String("new_values", strings.Join(buff.Values, ", ")))
+	}
 
 	w.Header().Set("Content-Type", "application/plaintext")
 	w.Write([]byte(output))
 }
 
+// Validates Env Var name against types and algorithms
+func (eph *EPHandle) findEnvVar(find string) bool {
+	var front, back bool
+	parts := strings.Split(find, "_")
+
+	for k := range eph.MTypes {
+		if strings.ToUpper(k) == parts[0] {
+			// it's valid, tag it as true
+			front = true
+		}
+
+		algoparams := []string{
+			"SIZE",
+			"LIMIT",
+			"TAIL",
+			"MOD",
+		}
+		for _, p := range algoparams {
+			if p == parts[1] {
+				// it's valid, tag it as true
+				back = true
+			}
+		}
+	}
+
+	// return truth table of front and back
+	return front && back
+}
+
 // Series of monotonic values
 func getConfiguredBuffer(mt, algo string) *CycBuffer {
-	size := FillEnvVarInt(strings.ToUpper(mt)+"_SIZE", 10)
-	limit := FillEnvVarInt(strings.ToUpper(mt)+"_LIMIT", 10)
-	tail := FillEnvVarInt(strings.ToUpper(mt)+"_TAIL", 1)
+	size := FillEnvVarInt(strings.ToUpper(mt)+"_SIZE", defSize)
+	limit := FillEnvVarInt(strings.ToUpper(mt)+"_LIMIT", defLimit)
+	tail := FillEnvVarInt(strings.ToUpper(mt)+"_TAIL", defTail)
 	modenv := FillEnvVar(strings.ToUpper(mt) + "_MOD")
 	mod, err := strconv.ParseFloat(modenv, 64)
 	if err != nil {
-		slog.Warn("Default chosen",
+		slog.Debug("Default chosen",
 			slog.String("mod", modenv))
-		mod = 1
+		mod = defMod
 	}
 
 	slog.Debug("INIT SHIFT REGISTER",
@@ -129,7 +202,7 @@ func getConfiguredBuffer(mt, algo string) *CycBuffer {
 	return NewShiftCycBuffer(size, limit, tail, mod, mt, algo)
 }
 
-// Static Random values
+// Static Random values with different defaults
 func getRandomizedBuffer(mt, algo string) *CycBuffer {
 	size := FillEnvVarInt("RAND_SIZE", 1)
 	limit := FillEnvVarInt("RAND_LIMIT", 10000)
@@ -137,7 +210,7 @@ func getRandomizedBuffer(mt, algo string) *CycBuffer {
 	modenv := FillEnvVar("RAND_MOD")
 	mod, err := strconv.ParseFloat(modenv, 64)
 	if err != nil {
-		slog.Warn("Default chosen",
+		slog.Debug("Default chosen",
 			slog.String("mod", modenv))
 		mod = 10000
 	}
