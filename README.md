@@ -12,7 +12,7 @@ The Endpoints provide constantly changing 'metrics' that follow certain algorith
 2. Fill it with the variable list, see **Configure** below.
 3. Run it:
 ```shell
-docker run -d --env-file ./.env --rm --network host \\
+docker run -d --env-file ./.env --rm --network host \
     --name toadlester ghcr.io/maroda/toadlester:latest
 ```
 4. Test it:
