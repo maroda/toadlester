@@ -27,6 +27,7 @@ func TestSetupMux_Data(t *testing.T) {
 		{name: "Exponent Walk Down", target: "/series/exp/down", wantCode: http.StatusOK, expect: "Metric_exp_down: "},
 		{name: "Integer Walk Up", target: "/series/int/up", wantCode: http.StatusOK, expect: "Metric_int_up: "},
 		{name: "Integer Walk Down", target: "/series/int/down", wantCode: http.StatusOK, expect: "Metric_int_down: "},
+		{name: "current configuration", target: "/current/json", wantCode: http.StatusOK, expect: "INT_SIZE"},
 	}
 
 	for _, tt := range tests {
