@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -84,10 +85,31 @@ func (eph *EPHandle) SetupMux() *mux.Router {
 
 	r.HandleFunc("/rand/all", eph.RandDataAllHandler)
 	r.HandleFunc("/metrics", eph.SeriesDataAllHandler)
+	r.HandleFunc("/current/{type}", eph.CurrentStateHandler).Methods("GET")
 	r.PathPrefix("/reset").HandlerFunc(eph.ResetHandler)
 	r.PathPrefix("/series").HandlerFunc(eph.SeriesInternalDataHandler)
 
 	return r
+}
+
+func (eph *EPHandle) CurrentStateHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	dataType := vars["type"]
+	params := []string{"SIZE", "LIMIT", "TAIL", "MOD"}
+	config := make(map[string]string)
+
+	switch dataType {
+	case "json":
+		for mt := range eph.MTypes {
+			for _, p := range params {
+				envvar := strings.ToUpper(fmt.Sprintf("%s_%s", mt, p))
+				config[envvar] = os.Getenv(envvar)
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(config)
+	}
 }
 
 // ResetHandler sets new values for each shift register buffer
@@ -160,13 +182,13 @@ func (eph *EPHandle) findEnvVar(find string) bool {
 			front = true
 		}
 
-		algoparams := []string{
+		params := []string{
 			"SIZE",
 			"LIMIT",
 			"TAIL",
 			"MOD",
 		}
-		for _, p := range algoparams {
+		for _, p := range params {
 			if p == parts[1] {
 				// it's valid, tag it as true
 				back = true
